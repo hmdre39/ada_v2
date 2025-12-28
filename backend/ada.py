@@ -408,6 +408,14 @@ class AudioLoop:
 
     def clear_audio_queue(self):
         """Clears the queue of pending audio chunks to stop playback immediately."""
+        # Cooldown to prevent rapid clearing which can cause choppy audio
+        current_time = time.time()
+        if hasattr(self, '_last_queue_clear_time'):
+            if current_time - self._last_queue_clear_time < 1.0:  # 1 second cooldown
+                return  # Skip clearing if we just cleared recently
+
+        self._last_queue_clear_time = current_time
+
         try:
             count = 0
             while not self.audio_in_queue.empty():
@@ -774,9 +782,11 @@ class AudioLoop:
                                     
                                     # Only send if there's new text
                                     if delta:
-                                        # User is speaking, interrupt model playback ONLY if AI is not currently speaking
-                                        # This prevents echo/feedback from interrupting AI's own speech
-                                        if not self._ai_is_speaking:
+                                        # User is speaking - only interrupt if:
+                                        # 1. AI is not currently speaking, AND
+                                        # 2. The transcription is substantial (not just noise/short sounds)
+                                        # This prevents echo/feedback and brief noises from interrupting AI
+                                        if not self._ai_is_speaking and len(delta.strip()) > 2:
                                             self.clear_audio_queue()
 
                                         # Send to frontend (Streaming)
@@ -1244,7 +1254,14 @@ class AudioLoop:
             rate=RECEIVE_SAMPLE_RATE,
             output=True,
             output_device_index=self.output_device_index,
+            frames_per_buffer=4096,  # Larger buffer to prevent underruns
         )
+
+        # Buffer settings for smooth playback
+        MIN_BUFFER_CHUNKS = 3  # Wait for at least 3 chunks before starting playback
+        audio_buffer = []
+        playback_started = False
+
         while True:
             bytestream = await self.audio_in_queue.get()
 
@@ -1255,18 +1272,34 @@ class AudioLoop:
             if self.on_audio_data:
                 self.on_audio_data(bytestream)
 
-            # Play audio without any delays - critical for smooth playback!
-            await asyncio.to_thread(stream.write, bytestream)
+            # Buffer initial chunks to prevent choppy start
+            if not playback_started:
+                audio_buffer.append(bytestream)
+                if len(audio_buffer) >= MIN_BUFFER_CHUNKS:
+                    # Play all buffered chunks
+                    for chunk in audio_buffer:
+                        await asyncio.to_thread(stream.write, chunk)
+                    audio_buffer = []
+                    playback_started = True
+            else:
+                # Play audio without any delays - critical for smooth playback!
+                await asyncio.to_thread(stream.write, bytestream)
+
+            # Reset playback state when queue is empty and AI stopped
+            if self.audio_in_queue.empty() and not self._ai_is_speaking:
+                playback_started = False
+                audio_buffer = []
 
     async def monitor_ai_speaking_state(self):
         """Background task to reset AI speaking state after silence"""
         while True:
             await asyncio.sleep(0.1)  # Check every 100ms
             if self._ai_is_speaking:
-                # If no audio received for 500ms, consider AI stopped speaking
-                if time.time() - self._last_ai_audio_time > 0.5:
+                # If no audio received for 1.5 seconds, consider AI stopped speaking
+                # Using longer timeout to account for natural speech pauses
+                if time.time() - self._last_ai_audio_time > 1.5:
                     self._ai_is_speaking = False
-                    print("[ADA DEBUG] AI stopped speaking (500ms silence)")
+                    print("[ADA DEBUG] AI stopped speaking (1.5s silence)")
 
     async def get_frames(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION)
