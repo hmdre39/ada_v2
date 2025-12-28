@@ -74,7 +74,7 @@ DEFAULT_SETTINGS = {
     "camera_flipped": False, # Invert cursor horizontal direction
     # Enhanced Audio Settings
     "voice_name": "Kore",  # Selected Gemini voice
-    "enable_noise_gate": True,  # Noise suppression
+    "enable_noise_gate": False,  # Noise suppression (disabled by default - can cause audio issues)
     "enable_wake_word": False,  # Wake word detection (requires API key)
     "wake_word_key": None,  # Porcupine API key
     "enable_recording": False,  # Audio recording capability
