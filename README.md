@@ -25,6 +25,20 @@ ADA V2 is a sophisticated AI assistant designed for multimodal interaction. It c
 | **🏠 Smart Home** | Voice control for TP-Link Kasa devices | `python-kasa` |
 | **📁 Project Memory** | Persistent context across sessions | File-based JSON storage |
 
+### 🎨 UI/UX Enhancements (NEW!)
+
+Professional interface improvements for better usability:
+
+| Feature | Description |
+|---------|-------------|
+| **📊 Audio VU Meters** | Real-time visual audio level indicators with peak hold |
+| **🌐 Connection Status** | Live connection state indicator with latency display |
+| **⌨️ Keyboard Shortcuts** | Quick actions (Ctrl+M mute, Ctrl+R record, etc.) |
+| **🔔 Toast Notifications** | Non-intrusive success/error/warning messages |
+| **📖 Shortcuts Help** | Interactive keyboard shortcuts reference (press `?`) |
+
+> 📖 **See [UI_ENHANCEMENTS.md](UI_ENHANCEMENTS.md) for complete documentation**
+
 ### 🎙️ Enhanced Voice Features (NEW!)
 
 ADA V2 now includes professional-grade audio processing:
