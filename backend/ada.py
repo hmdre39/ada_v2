@@ -1248,18 +1248,25 @@ class AudioLoop:
         while True:
             bytestream = await self.audio_in_queue.get()
 
-            # Mark that AI is speaking
+            # Mark that AI is speaking and update timestamp
             self._ai_is_speaking = True
             self._last_ai_audio_time = time.time()
 
             if self.on_audio_data:
                 self.on_audio_data(bytestream)
+
+            # Play audio without any delays - critical for smooth playback!
             await asyncio.to_thread(stream.write, bytestream)
 
-            # Check if AI stopped speaking (no audio for 0.3 seconds)
-            await asyncio.sleep(0.01)
-            if time.time() - self._last_ai_audio_time > 0.3:
-                self._ai_is_speaking = False
+    async def monitor_ai_speaking_state(self):
+        """Background task to reset AI speaking state after silence"""
+        while True:
+            await asyncio.sleep(0.1)  # Check every 100ms
+            if self._ai_is_speaking:
+                # If no audio received for 500ms, consider AI stopped speaking
+                if time.time() - self._last_ai_audio_time > 0.5:
+                    self._ai_is_speaking = False
+                    print("[ADA DEBUG] AI stopped speaking (500ms silence)")
 
     async def get_frames(self):
         cap = await asyncio.to_thread(cv2.VideoCapture, 0, cv2.CAP_AVFOUNDATION)
@@ -1320,6 +1327,7 @@ class AudioLoop:
 
                     tg.create_task(self.receive_audio())
                     tg.create_task(self.play_audio())
+                    tg.create_task(self.monitor_ai_speaking_state())  # Monitor AI speech state
 
                     # Handle Startup vs Reconnect Logic
                     if not is_reconnect:
