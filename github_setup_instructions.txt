@@ -1,0 +1,22 @@
+@echo off
+echo ========================================
+echo GitHub Repository Setup Instructions
+echo ========================================
+echo.
+echo If the repository doesn't exist yet on GitHub:
+echo.
+echo 1. Go to: https://github.com/hmdre39
+echo 2. Click the green "New" button
+echo 3. Repository name: ada_v2
+echo 4. Description (optional): Enhanced voice assistant with memory, face auth, and smart home control
+echo 5. Choose Public or Private
+echo 6. DO NOT add README, .gitignore, or license (you already have these)
+echo 7. Click "Create repository"
+echo.
+echo Then run: git_push_hmdre39.bat
+echo.
+echo ========================================
+echo If repository already exists, just run:
+echo   git_push_hmdre39.bat
+echo ========================================
+pause
