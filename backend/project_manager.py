@@ -141,7 +141,7 @@ class ProjectManager:
 
         return "\n".join(context_lines)
 
-    def get_recent_chat_history(self, limit: int = 10):
+    def get_recent_chat_history(self, limit: int = 50):
         """Returns the last 'limit' chat messages from history."""
         log_file = self.get_current_project_path() / "chat_history.jsonl"
         if not log_file.exists():

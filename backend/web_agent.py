@@ -278,8 +278,8 @@ class WebAgent:
                     final_response = agent_text
 
                 if update_callback and thought_text:
-                     # Send thoughts without image update yet
-                     pass # await update_callback(None, thought_text)
+                     # Send thoughts with current screenshot
+                     await update_callback(None, thought_text)
 
                 function_calls = [part.function_call for part in model_content.parts if part.function_call]
                 

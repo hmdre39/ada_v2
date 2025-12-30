@@ -160,7 +160,15 @@ class FaceAuthenticator:
     def _run_cv_loop(self, loop):
         def try_open_camera(index):
             print(f"[AUTH] Trying to open camera with index {index}...")
-            cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+            # Use CAP_DSHOW on Windows, CAP_AVFOUNDATION on macOS
+            import platform
+            if platform.system() == 'Windows':
+                cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
+            elif platform.system() == 'Darwin':  # macOS
+                cap = cv2.VideoCapture(index, cv2.CAP_AVFOUNDATION)
+            else:  # Linux
+                cap = cv2.VideoCapture(index)
+            
             if not cap.isOpened():
                 print(f"[AUTH] [ERR] Could not open video device {index}.")
                 return None

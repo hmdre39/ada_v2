@@ -25,11 +25,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import ada
 from authenticator import FaceAuthenticator
 from kasa_agent import KasaAgent
+from hue_agent import HueAgent
 
 # Create a Socket.IO server
 sio = socketio.AsyncServer(async_mode='asgi', cors_allowed_origins='*')
-app = FastAPI()
-app_socketio = socketio.ASGIApp(sio, app)
 
 import signal
 
@@ -55,6 +54,7 @@ audio_loop = None
 loop_task = None
 authenticator = None
 kasa_agent = KasaAgent()
+hue_agent = None  # Initialize after settings load
 SETTINGS_FILE = "settings.json"
 
 DEFAULT_SETTINGS = {
@@ -71,6 +71,8 @@ DEFAULT_SETTINGS = {
     },
     "printers": [], # List of {host, port, name, type}
     "kasa_devices": [], # List of {ip, alias, model}
+    "hue_bridge_ip": "192.168.86.68",  # Philips Hue Bridge
+    "hue_username": "P82u7Cds2TuL7av95ij6dqsCzcVj5Ffxa4d107K3",  # Hue API key
     "camera_flipped": False, # Invert cursor horizontal direction
     # Enhanced Audio Settings
     "voice_name": "Fenrir",  # Selected Gemini voice (male, deep)
@@ -78,6 +80,9 @@ DEFAULT_SETTINGS = {
     "enable_wake_word": False,  # Wake word detection (requires API key)
     "wake_word_key": None,  # Porcupine API key
     "enable_recording": False,  # Audio recording capability
+    # Memory Settings
+    "memory_context_limit": 100,  # Number of past messages to load on reconnect (50-200 recommended)
+    "max_memory_file_size_mb": 50,  # Max size for uploaded memory files in MB
 }
 
 SETTINGS = DEFAULT_SETTINGS.copy()
@@ -112,10 +117,17 @@ load_settings()
 
 authenticator = None
 kasa_agent = KasaAgent(known_devices=SETTINGS.get("kasa_devices"))
+hue_agent = HueAgent(
+    bridge_ip=SETTINGS.get("hue_bridge_ip"),
+    username=SETTINGS.get("hue_username")
+)
 # tool_permissions is now SETTINGS["tool_permissions"]
 
-@app.on_event("startup")
-async def startup_event():
+from contextlib import asynccontextmanager
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup code
     import sys
     print(f"[SERVER DEBUG] Startup Event Triggered")
     print(f"[SERVER DEBUG] Python Version: {sys.version}")
@@ -129,6 +141,13 @@ async def startup_event():
 
     print("[SERVER] Startup: Initializing Kasa Agent...")
     await kasa_agent.initialize()
+    yield
+    # Shutdown code (if needed)
+    pass
+
+# Create FastAPI app with lifespan
+app = FastAPI(lifespan=lifespan)
+app_socketio = socketio.ASGIApp(sio, app)
 
 @app.get("/status")
 async def status():
@@ -227,8 +246,9 @@ async def start_audio(sid, data=None):
 
     # Callback to send Browser data to frontend
     def on_web_data(data):
+        from json_sanitizer import sanitize_for_json
         print(f"Sending Browser data to frontend: {len(data.get('log', ''))} chars logs")
-        asyncio.create_task(sio.emit('browser_frame', data))
+        asyncio.create_task(sio.emit('browser_frame', sanitize_for_json(data)))
         
     # Callback to send Transcription data to frontend
     def on_transcription(data):
@@ -276,7 +296,8 @@ async def start_audio(sid, data=None):
 
     # Callback to send Audio Metrics to frontend
     def on_audio_metrics(metrics):
-        asyncio.create_task(sio.emit('audio_metrics', metrics))
+        from json_sanitizer import sanitize_for_json
+        asyncio.create_task(sio.emit('audio_metrics', sanitize_for_json(metrics)))
 
     # Initialize ADA with enhanced features
     try:
@@ -298,6 +319,7 @@ async def start_audio(sid, data=None):
             input_device_index=device_index,
             input_device_name=device_name,
             kasa_agent=kasa_agent,
+            hue_agent=hue_agent,
 
             # Enhanced audio settings
             voice_name=SETTINGS.get("voice_name", "Kore"),
@@ -946,6 +968,62 @@ async def control_kasa(sid, data):
     except Exception as e:
          print(f"Error controlling kasa: {e}")
          await sio.emit('error', {'msg': f"Kasa Control Error: {str(e)}"})
+
+@sio.event
+async def discover_hue(sid):
+    """Discover and list all Hue lights"""
+    print("Received discover_hue request")
+    
+    if not hue_agent.bridge_ip or not hue_agent.username:
+        await sio.emit('error', {'msg': "Hue not configured. Please check settings."})
+        return
+    
+    try:
+        await hue_agent.get_lights()
+        lights = hue_agent.format_lights_for_frontend()
+        await sio.emit('hue_lights', lights)
+        await sio.emit('status', {'msg': f"Found {len(lights)} Hue lights"})
+        print(f"[SERVER] Sent {len(lights)} Hue lights to frontend")
+    except Exception as e:
+        print(f"Error discovering Hue: {e}")
+        await sio.emit('error', {'msg': f"Hue Discovery Failed: {str(e)}"})
+
+@sio.event
+async def control_hue(sid, data):
+    """Control a Hue light"""
+    # data: { light_id, action: "on"|"off"|"brightness"|"color"|"color_temp", value: ... }
+    light_id = data.get('light_id')
+    action = data.get('action')
+    print(f"Hue Control: Light {light_id} -> {action}")
+    
+    try:
+        success = False
+        if action == "on":
+            success = await hue_agent.turn_on(light_id)
+        elif action == "off":
+            success = await hue_agent.turn_off(light_id)
+        elif action == "brightness":
+            val = data.get('value', 254)  # 0-254 for Hue
+            success = await hue_agent.set_brightness(light_id, val)
+        elif action == "color":
+            hue_val = data.get('hue', 0)  # 0-65535
+            sat_val = data.get('sat', 254)  # 0-254
+            success = await hue_agent.set_color(light_id, hue_val, sat_val)
+        elif action == "color_temp":
+            ct_val = data.get('value', 300)  # 153-500 mireds
+            success = await hue_agent.set_color_temp(light_id, ct_val)
+        
+        if success:
+            # Refresh lights to get updated state
+            await hue_agent.get_lights()
+            lights = hue_agent.format_lights_for_frontend()
+            await sio.emit('hue_lights', lights)
+            await sio.emit('status', {'msg': f"Light {light_id} updated"})
+        else:
+            await sio.emit('error', {'msg': f"Failed to control light {light_id}"})
+    except Exception as e:
+        print(f"Error controlling Hue: {e}")
+        await sio.emit('error', {'msg': f"Hue Control Error: {str(e)}"})
 
 @sio.event
 async def get_settings(sid):

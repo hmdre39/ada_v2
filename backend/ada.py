@@ -14,6 +14,7 @@ import argparse
 import math
 import struct
 import time
+import websockets.exceptions
 
 from google import genai
 from google.genai import types
@@ -32,6 +33,7 @@ if sys.version_info < (3, 11, 0):
     asyncio.ExceptionGroup = exceptiongroup.ExceptionGroup
 
 from tools import tools_list
+from json_sanitizer import sanitize_for_json
 
 FORMAT = pyaudio.paInt16
 CHANNELS = 1
@@ -150,6 +152,42 @@ control_light_tool = {
     }
 }
 
+list_hue_lights_tool = {
+    "name": "list_hue_lights",
+    "description": "Lists all Philips Hue lights and their current state.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {},
+    }
+}
+
+control_hue_light_tool = {
+    "name": "control_hue_light",
+    "description": "Controls a Philips Hue light by name or ID.",
+    "parameters": {
+        "type": "OBJECT",
+        "properties": {
+            "light_name": {
+                "type": "STRING",
+                "description": "The name or ID of the Hue light to control (e.g., 'Office 1', 'Bedroom', or light ID like '9')."
+            },
+            "action": {
+                "type": "STRING",
+                "description": "The action: 'turn_on', 'turn_off', 'set_brightness', or 'set_color'."
+            },
+            "brightness": {
+                "type": "INTEGER",
+                "description": "Optional brightness level (0-100) for set_brightness action."
+            },
+            "color": {
+                "type": "STRING",
+                "description": "Optional color name for set_color (e.g., 'red', 'blue', 'warm white', 'cool white')."
+            }
+        },
+        "required": ["light_name", "action"]
+    }
+}
+
 discover_printers_tool = {
     "name": "discover_printers",
     "description": "Discovers 3D printers available on the local network.",
@@ -198,7 +236,7 @@ iterate_cad_tool = {
     "behavior": "NON_BLOCKING"
 }
 
-tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
+tools = [{'google_search': {}}, {"function_declarations": [generate_cad, run_web_agent, create_project_tool, switch_project_tool, list_projects_tool, list_smart_devices_tool, control_light_tool, list_hue_lights_tool, control_hue_light_tool, discover_printers_tool, print_stl_tool, get_print_status_tool, iterate_cad_tool] + tools_list[0]['function_declarations'][1:]}]
 
 # --- CONFIG BUILDER FUNCTION ---
 def build_config(voice_name: str = "Fenrir"):
@@ -230,10 +268,11 @@ pya = pyaudio.PyAudio()
 from cad_agent import CadAgent
 from web_agent import WebAgent
 from kasa_agent import KasaAgent
+from hue_agent import HueAgent
 from printer_agent import PrinterAgent
 
 class AudioLoop:
-    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_metrics=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, voice_name="Kore", enable_noise_gate=True, enable_wake_word=False, wake_word_key=None, enable_recording=False):
+    def __init__(self, video_mode=DEFAULT_MODE, on_audio_data=None, on_video_frame=None, on_cad_data=None, on_web_data=None, on_transcription=None, on_tool_confirmation=None, on_cad_status=None, on_cad_thought=None, on_project_update=None, on_device_update=None, on_error=None, on_audio_metrics=None, input_device_index=None, input_device_name=None, output_device_index=None, kasa_agent=None, hue_agent=None, voice_name="Kore", enable_noise_gate=True, enable_wake_word=False, wake_word_key=None, enable_recording=False):
         self.video_mode = video_mode
         self.on_audio_data = on_audio_data
         self.on_video_frame = on_video_frame
@@ -310,6 +349,7 @@ class AudioLoop:
         self.cad_agent = CadAgent(on_thought=handle_cad_thought, on_status=handle_cad_status)
         self.web_agent = WebAgent()
         self.kasa_agent = kasa_agent if kasa_agent else KasaAgent()
+        self.hue_agent = hue_agent if hue_agent else HueAgent()
         self.printer_agent = PrinterAgent()
 
         self.send_text_task = None
@@ -782,16 +822,15 @@ class AudioLoop:
                                     
                                     # Only send if there's new text
                                     if delta:
-                                        # User is speaking - only interrupt if:
-                                        # 1. AI is not currently speaking, AND
-                                        # 2. The transcription is substantial (not just noise/short sounds)
-                                        # This prevents echo/feedback and brief noises from interrupting AI
-                                        if not self._ai_is_speaking and len(delta.strip()) > 2:
-                                            self.clear_audio_queue()
+                                        # INTERRUPTION DISABLED WHILE AI IS SPEAKING
+                                        # Don't clear audio queue at all during user transcription
+                                        # The AI's own voice gets picked up by the mic (echo) and triggers false interruptions
+                                        # Users can manually interrupt by stopping/pausing if needed
+                                        pass  # Interruption disabled
 
-                                        # Send to frontend (Streaming)
+                                        # Send to frontend (Streaming) - sanitize for JSON
                                         if self.on_transcription:
-                                             self.on_transcription({"sender": "User", "text": delta})
+                                            self.on_transcription(sanitize_for_json({"sender": "User", "text": delta}))
                                         
                                         # Buffer for Logging
                                         if self.chat_buffer["sender"] != "User":
@@ -817,9 +856,9 @@ class AudioLoop:
                                     
                                     # Only send if there's new text
                                     if delta:
-                                        # Send to frontend (Streaming)
+                                        # Send to frontend (Streaming) - sanitize for JSON
                                         if self.on_transcription:
-                                             self.on_transcription({"sender": "JARVIS", "text": delta})
+                                            self.on_transcription(sanitize_for_json({"sender": "JARVIS", "text": delta}))
 
                                         # Buffer for Logging
                                         if self.chat_buffer["sender"] != "JARVIS":
@@ -1237,9 +1276,16 @@ class AudioLoop:
                 
                 # Turn/Response Loop Finished
                 self.flush_chat()
-
-                while not self.audio_in_queue.empty():
-                    self.audio_in_queue.get_nowait()
+                
+                # DON'T clear the audio queue here - let it play out naturally
+        except websockets.exceptions.ConnectionClosedError as e:
+            print(f"[ADA DEBUG] [ERR] WebSocket connection closed: {e}")
+            # This is expected during reconnection - re-raise to trigger reconnect
+            raise e
+        except websockets.exceptions.ConnectionClosedError as e:
+            print(f"[ADA DEBUG] [ERR] WebSocket connection closed: {e}")
+            # This is expected during reconnection - re-raise to trigger reconnect
+            raise e
         except Exception as e:
             print(f"Error in receive_audio: {e}")
             traceback.print_exc()
@@ -1254,16 +1300,37 @@ class AudioLoop:
             rate=RECEIVE_SAMPLE_RATE,
             output=True,
             output_device_index=self.output_device_index,
-            frames_per_buffer=4096,  # Larger buffer to prevent underruns
+            frames_per_buffer=8192,  # Increased buffer to prevent audio underruns
         )
 
-        # Buffer settings for smooth playback
-        MIN_BUFFER_CHUNKS = 3  # Wait for at least 3 chunks before starting playback
-        audio_buffer = []
-        playback_started = False
+        chunk_count = 0
+        last_log_time = time.time()
+        MIN_BUFFER = 10  # Wait for 10 chunks before starting playback (more tolerance for network lag)
+        prebuffer_complete = False
 
         while True:
+            # Pre-buffer on first start to prevent stuttering
+            if not prebuffer_complete:
+                if self.audio_in_queue.qsize() < MIN_BUFFER:
+                    await asyncio.sleep(0.1)
+                    continue
+                prebuffer_complete = True
+                print(f"[ADA DEBUG] [AUDIO] Pre-buffer complete, starting playback")
+            
             bytestream = await self.audio_in_queue.get()
+            
+            chunk_count += 1
+            current_time = time.time()
+            
+            # Log every 50 chunks or if there's a big gap
+            if chunk_count % 50 == 0 or (current_time - last_log_time > 2.0):
+                queue_size = self.audio_in_queue.qsize()
+                print(f"[ADA DEBUG] [AUDIO] Playing chunk #{chunk_count}, queue size: {queue_size}")
+                last_log_time = current_time
+                
+                # Warn if queue is getting empty (might cause skipping)
+                if queue_size < 3:
+                    print(f"[ADA DEBUG] [WARN] Audio queue running low: {queue_size} chunks")
 
             # Mark that AI is speaking and update timestamp
             self._ai_is_speaking = True
@@ -1272,23 +1339,16 @@ class AudioLoop:
             if self.on_audio_data:
                 self.on_audio_data(bytestream)
 
-            # Buffer initial chunks to prevent choppy start
-            if not playback_started:
-                audio_buffer.append(bytestream)
-                if len(audio_buffer) >= MIN_BUFFER_CHUNKS:
-                    # Play all buffered chunks
-                    for chunk in audio_buffer:
-                        await asyncio.to_thread(stream.write, chunk)
-                    audio_buffer = []
-                    playback_started = True
-            else:
-                # Play audio without any delays - critical for smooth playback!
+            # Play audio immediately - no buffering delays
+            try:
                 await asyncio.to_thread(stream.write, bytestream)
-
-            # Reset playback state when queue is empty and AI stopped
+            except Exception as e:
+                print(f"[ADA DEBUG] [ERR] Audio playback error: {e}")
+            
+            # If queue is empty and AI stopped, reset pre-buffer for next playback
             if self.audio_in_queue.empty() and not self._ai_is_speaking:
-                playback_started = False
-                audio_buffer = []
+                prebuffer_complete = False
+                chunk_count = 0
 
     async def monitor_ai_speaking_state(self):
         """Background task to reset AI speaking state after silence"""
